@@ -216,3 +216,35 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+# ==============================
+# Thiran Vision AI project files
+# ==============================
+
+# AI generated outputs
+ai/output/*
+!ai/output/.gitkeep
+
+# Temporary AI input files
+ai/input/*
+!ai/input/.gitkeep
+
+# Large test media files
+*.avi
+*.mov
+*.mkv
+*.wmv
+
+# Optional: ignore MP4 test videos
+# Uncomment only if you do not want to upload any MP4 files
+# *.mp4
+
+# IDE folders
+.vscode/
+.idea/
+
+# Windows system files
+Thumbs.db
+Desktop.ini
+
+# macOS system files
+.DS_Store
