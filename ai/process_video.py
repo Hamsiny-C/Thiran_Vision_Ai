@@ -1,9 +1,14 @@
 import os
+import time
 import cv2
 import tkinter as tk
 
 from tkinter import filedialog
 
+from ai.config import (
+    OUTPUT_DIRECTORY,
+    VIDEO_PROCESS_EVERY_N_FRAMES
+)
 from ai.detector import detect
 from ai.ppe_checker import count_workers, analyze_ppe
 from ai.visualizer import draw_detection_dashboard
@@ -11,210 +16,197 @@ from ai.visualizer import draw_detection_dashboard
 
 def select_video():
     root = tk.Tk()
-
     root.withdraw()
+    root.attributes("-topmost", True)
 
     video_path = filedialog.askopenfilename(
-        title="Select a video for PPE detection",
+        title="Select a video",
         filetypes=[
-            ("Video files", "*.mp4 *.avi *.mov *.mkv *.wmv"),
-            ("MP4 files", "*.mp4"),
-            ("AVI files", "*.avi"),
-            ("All files", "*.*")
+            (
+                "Video files",
+                "*.mp4 *.avi *.mov *.mkv *.wmv"
+            )
         ]
     )
 
     root.destroy()
-
     return video_path
 
 
-def open_video(video_path):
+def process_video(video_path=None):
+
     if not video_path:
-        return None
+        video_path = select_video()
 
-    if not os.path.exists(video_path):
-        print("Error: Selected video does not exist.")
-        return None
+    if not video_path:
+        print("No video selected.")
+        return
 
-    video = cv2.VideoCapture(video_path)
+    capture = cv2.VideoCapture(video_path)
 
-    if not video.isOpened():
-        print("Error: Selected video could not be opened.")
-        return None
+    if not capture.isOpened():
+        print("Unable to open the selected video.")
+        return
 
-    return video
+    original_fps = capture.get(cv2.CAP_PROP_FPS)
 
-
-def process_video(video_path):
-    video = open_video(video_path)
-
-    if video is None:
-        return {
-            "success": False,
-            "message": "Video could not be opened."
-        }
+    if original_fps <= 0:
+        original_fps = 25.0
 
     width = int(
-        video.get(cv2.CAP_PROP_FRAME_WIDTH)
+        capture.get(cv2.CAP_PROP_FRAME_WIDTH)
     )
 
     height = int(
-        video.get(cv2.CAP_PROP_FRAME_HEIGHT)
-    )
-
-    fps = video.get(
-        cv2.CAP_PROP_FPS
+        capture.get(cv2.CAP_PROP_FRAME_HEIGHT)
     )
 
     total_frames = int(
-        video.get(cv2.CAP_PROP_FRAME_COUNT)
+        capture.get(cv2.CAP_PROP_FRAME_COUNT)
     )
 
-    if width <= 0 or height <= 0:
-        video.release()
-
-        return {
-            "success": False,
-            "message": "Invalid video resolution."
-        }
-
-    if fps <= 0:
-        fps = 25
-
-    output_folder = "ai/output"
-
     os.makedirs(
-        output_folder,
+        OUTPUT_DIRECTORY,
         exist_ok=True
     )
 
-    original_name = os.path.basename(
-        video_path
-    )
-
     video_name = os.path.splitext(
-        original_name
+        os.path.basename(video_path)
     )[0]
 
     output_path = os.path.join(
-        output_folder,
-        video_name + "_detected.mp4"
+        OUTPUT_DIRECTORY,
+        f"{video_name}_detected.mp4"
     )
 
-    fourcc = cv2.VideoWriter_fourcc(
-        *"mp4v"
-    )
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
 
     writer = cv2.VideoWriter(
         output_path,
         fourcc,
-        fps,
+        original_fps,
         (width, height)
     )
 
     if not writer.isOpened():
-        video.release()
+        capture.release()
+        print("Unable to create output video.")
+        return
 
-        return {
-            "success": False,
-            "message": "Processed video could not be created."
-        }
+    frame_number = 0
+    start_time = time.perf_counter()
 
-    frame_count = 0
-    maximum_worker_count = 0
-    last_ppe_summary = {}
+    cached_person_results = None
+    cached_ppe_results = None
+    cached_worker_count = 0
+    cached_ppe_summary = {}
 
-    print("\nTHIRAN VISION AI")
-    print("Video selected:", video_path)
-    print("Output path:", output_path)
-    print("Total frames:", total_frames)
-    print("Processing started...\n")
+    print("Video detection started.")
+    print("Press Q to stop.")
+    print(
+        f"AI processes one frame for every "
+        f"{VIDEO_PROCESS_EVERY_N_FRAMES} frames."
+    )
 
-    while True:
-        success, frame = video.read()
+    while capture.isOpened():
+
+        success, frame = capture.read()
 
         if not success:
             break
 
-        person_results, ppe_results = detect(
-            frame
+        frame_number += 1
+
+        should_detect = (
+            cached_person_results is None
+            or frame_number
+            % VIDEO_PROCESS_EVERY_N_FRAMES
+            == 1
         )
 
-        worker_count = count_workers(
-            person_results
+        if should_detect:
+            (
+                cached_person_results,
+                cached_ppe_results
+            ) = detect(
+                frame,
+                mode="video"
+            )
+
+            cached_worker_count = count_workers(
+                cached_person_results
+            )
+
+            cached_ppe_summary = analyze_ppe(
+                cached_ppe_results
+            )
+
+        elapsed = time.perf_counter() - start_time
+
+        processing_fps = (
+            frame_number / elapsed
+            if elapsed > 0
+            else 0.0
         )
 
-        ppe_summary = analyze_ppe(
-            ppe_results
-        )
-
-        maximum_worker_count = max(
-            maximum_worker_count,
-            worker_count
-        )
-
-        last_ppe_summary = ppe_summary
-
-        processed_frame = draw_detection_dashboard(
+        output_frame = draw_detection_dashboard(
             image=frame,
-            person_results=person_results,
-            ppe_results=ppe_results,
-            worker_count=worker_count,
-            ppe_summary=ppe_summary
+            person_results=cached_person_results,
+            ppe_results=cached_ppe_results,
+            worker_count=cached_worker_count,
+            ppe_summary=cached_ppe_summary,
+            fps=processing_fps,
+            show_status_bar=True
         )
 
-        writer.write(
-            processed_frame
-        )
+        writer.write(output_frame)
 
-        frame_count += 1
+        display_frame = output_frame
+
+        if width > 1100:
+            display_width = 1100
+            display_height = int(
+                height * display_width / width
+            )
+
+            display_frame = cv2.resize(
+                output_frame,
+                (display_width, display_height)
+            )
+
+        cv2.imshow(
+            "Thiran Vision AI - Video Detection",
+            display_frame
+        )
 
         if total_frames > 0:
             progress = (
-                frame_count / total_frames
+                frame_number / total_frames
             ) * 100
 
             print(
-                f"Processing: "
-                f"{frame_count}/{total_frames} "
-                f"frames - {progress:.1f}%",
-                end="\r"
+                f"\rProcessing: {progress:.1f}% "
+                f"({frame_number}/{total_frames})",
+                end=""
             )
 
-        else:
-            print(
-                f"Processing frame: {frame_count}",
-                end="\r"
-            )
+        key = cv2.waitKey(1) & 0xFF
 
-    video.release()
+        if key == ord("q"):
+            print("\nVideo processing stopped.")
+            break
+
+    capture.release()
     writer.release()
+    cv2.destroyAllWindows()
 
-    print("\n\nVideo processing completed.")
-    print("Processed video saved at:")
-    print(output_path)
+    total_time = time.perf_counter() - start_time
 
-    return {
-        "success": True,
-        "input_path": video_path,
-        "output_path": output_path,
-        "frames_processed": frame_count,
-        "maximum_worker_count": maximum_worker_count,
-        "ppe_summary": last_ppe_summary
-    }
+    print()
+    print("Video processing completed.")
+    print(f"Processing time: {total_time:.1f} seconds")
+    print(f"Output saved: {output_path}")
 
 
 if __name__ == "__main__":
-    selected_video = select_video()
-
-    if not selected_video:
-        print("No video selected.")
-
-    else:
-        result = process_video(
-            selected_video
-        )
-
-        print("\nFinal result:")
-        print(result)
+    process_video()
