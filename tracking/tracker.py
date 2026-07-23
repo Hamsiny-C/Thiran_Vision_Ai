@@ -1,104 +1,114 @@
-import math
+from typing import Dict, List, Tuple
 
-from tracking.worker import Worker
-from tracking.config import (
-    MAX_TRACKING_DISTANCE,
-    MAX_MISSING_FRAMES
-)
+from tracking.centroid_tracker import CentroidTracker
 
 
-class Tracker:
+BoundingBox = Tuple[int, int, int, int]
 
-    def __init__(self):
 
-        self.workers = {}
+class WorkerTracker:
+    """
+    Main tracking manager.
 
-        self.next_worker_id = 1
+    This class acts as the bridge between
+    the AI module and the centroid tracker.
+    """
 
-    def distance(self, point1, point2):
+    def __init__(
+        self,
+        max_disappeared: int = 25,
+        max_distance: int = 100
+    ):
 
-        return math.sqrt(
-            (point1[0] - point2[0]) ** 2 +
-            (point1[1] - point2[1]) ** 2
+        self.tracker = CentroidTracker(
+            max_disappeared=max_disappeared,
+            max_distance=max_distance
         )
 
-    def update(self, detections):
+    def update(
+        self,
+        person_boxes: List[BoundingBox]
+    ) -> Dict[int, Dict]:
         """
-        detections = list of center points
+        Update worker tracking.
+
+        Parameters
+        ----------
+        person_boxes
 
         Example:
-        [(120,230),(420,300)]
+        [
+            (10,20,100,250),
+            (250,40,380,300)
+        ]
+
+        Returns
+        -------
+        Dictionary containing tracked workers.
         """
 
-        updated = []
+        return self.tracker.update(person_boxes)
 
-        # Match detections with existing workers
-        for center in detections:
+    def get_workers(self) -> Dict[int, Dict]:
+        """
+        Return every tracked worker.
+        """
 
-            matched = None
-            minimum_distance = float("inf")
+        return self.tracker.workers
 
-            for worker in self.workers.values():
+    def get_visible_workers(self) -> Dict[int, Dict]:
+        """
+        Return only workers visible
+        in the current frame.
+        """
 
-                d = self.distance(
-                    worker.center,
-                    center
-                )
+        return self.tracker.get_visible_workers()
 
-                if (
-                    d < minimum_distance and
-                    d < MAX_TRACKING_DISTANCE
-                ):
-                    minimum_distance = d
-                    matched = worker
+    def worker_count(self) -> int:
+        """
+        Number of tracked workers.
+        """
 
-            if matched:
+        return len(self.tracker.workers)
 
-                matched.update(center)
+    def reset(self):
+        """
+        Clear tracker.
+        """
 
-                updated.append(
-                    matched.id
-                )
+        self.tracker.reset()
 
-            else:
 
-                worker = Worker(
-                    self.next_worker_id,
-                    center
-                )
+_global_tracker = WorkerTracker()
 
-                self.workers[
-                    self.next_worker_id
-                ] = worker
 
-                updated.append(
-                    self.next_worker_id
-                )
+def update_tracking(
+    person_boxes: List[BoundingBox]
+):
+    """
+    Global helper.
 
-                self.next_worker_id += 1
+    Used directly by AI.
 
-        # Increase missing frame count
-        remove = []
+    Example:
 
-        for worker_id, worker in self.workers.items():
+    tracked_workers = update_tracking(boxes)
+    """
 
-            if worker_id not in updated:
+    return _global_tracker.update(person_boxes)
 
-                worker.increase_missing()
 
-                if (
-                    worker.missing_frames >
-                    MAX_MISSING_FRAMES
-                ):
-                    remove.append(
-                        worker_id
-                    )
+def get_visible_workers():
+    """
+    Return visible workers.
+    """
 
-        # Remove disappeared workers
-        for worker_id in remove:
+    return _global_tracker.get_visible_workers()
 
-            del self.workers[
-                worker_id
-            ]
 
-        return self.workers  
+def reset_tracker():
+    """
+    Reset global tracker.
+    """
+
+    _global_tracker.reset()  

@@ -1,6 +1,61 @@
+def normalize_class_name(class_name):
+    return (
+        str(class_name)
+        .strip()
+        .lower()
+        .replace("_", "-")
+        .replace(" ", "-")
+    )
+
+
+def extract_detections(results):
+    detections = []
+
+    if results is None:
+        return detections
+
+    for result in results:
+
+        if result.boxes is None:
+            continue
+
+        for box in result.boxes:
+
+            class_id = int(box.cls[0])
+            class_name = result.names[class_id]
+            confidence = float(box.conf[0])
+
+            x1, y1, x2, y2 = map(
+                int,
+                box.xyxy[0].tolist()
+            )
+
+            detections.append({
+                "class_id": class_id,
+                "class_name": class_name,
+                "normalized_name":
+                    normalize_class_name(class_name),
+                "confidence": confidence,
+                "box": (x1, y1, x2, y2)
+            })
+
+    return detections
+
+
+def count_workers(person_results):
+    count = 0
+
+    for detection in extract_detections(
+        person_results
+    ):
+        if detection["normalized_name"] == "person":
+            count += 1
+
+    return count
+
+
 def analyze_ppe(ppe_results):
     summary = {
-        "person": 0,
         "hardhat": 0,
         "no_hardhat": 0,
         "safety_vest": 0,
@@ -14,66 +69,51 @@ def analyze_ppe(ppe_results):
         "fall_detected": 0
     }
 
-    for result in ppe_results:
+    name_mapping = {
+        "hardhat": "hardhat",
+        "helmet": "hardhat",
 
-        if result.boxes is None:
-            continue
+        "no-hardhat": "no_hardhat",
+        "no-helmet": "no_hardhat",
 
-        for box in result.boxes:
+        "safety-vest": "safety_vest",
+        "vest": "safety_vest",
 
-            class_id = int(box.cls[0])
-            class_name = result.names[class_id]
+        "no-safety-vest": "no_safety_vest",
+        "no-vest": "no_safety_vest",
 
-            if class_name == "Hardhat":
-                summary["hardhat"] += 1
+        "gloves": "gloves",
+        "glove": "gloves",
 
-            elif class_name == "NO-Hardhat":
-                summary["no_hardhat"] += 1
+        "no-gloves": "no_gloves",
+        "no-glove": "no_gloves",
 
-            elif class_name == "Safety Vest":
-                summary["safety_vest"] += 1
+        "goggles": "goggles",
+        "goggle": "goggles",
 
-            elif class_name == "NO-Safety Vest":
-                summary["no_safety_vest"] += 1
+        "no-goggles": "no_goggles",
+        "no-goggle": "no_goggles",
 
-            elif class_name == "Gloves":
-                summary["gloves"] += 1
+        "mask": "mask",
 
-            elif class_name == "NO-Gloves":
-                summary["no_gloves"] += 1
+        "no-mask": "no_mask",
 
-            elif class_name == "Goggles":
-                summary["goggles"] += 1
+        "fall-detected": "fall_detected",
+        "fall": "fall_detected"
+    }
 
-            elif class_name == "NO-Goggles":
-                summary["no_goggles"] += 1
+    for detection in extract_detections(
+        ppe_results
+    ):
+        normalized_name = detection[
+            "normalized_name"
+        ]
 
-            elif class_name == "Mask":
-                summary["mask"] += 1
+        summary_key = name_mapping.get(
+            normalized_name
+        )
 
-            elif class_name == "NO-Mask":
-                summary["no_mask"] += 1
+        if summary_key is not None:
+            summary[summary_key] += 1
 
-            elif class_name == "Fall-Detected":
-                summary["fall_detected"] += 1
-
-    return summary
-
-
-def count_workers(person_results):
-
-    count = 0
-
-    for result in person_results:
-
-        if result.boxes is None:
-            continue
-
-        for box in result.boxes:
-
-            class_id = int(box.cls[0])
-
-            if result.names[class_id] == "person":
-                count += 1
-
-    return count
+    return summary 

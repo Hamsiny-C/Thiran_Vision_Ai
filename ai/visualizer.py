@@ -1,609 +1,783 @@
 import cv2
-from datetime import datetime
+
+from ai.ppe_checker import extract_detections
 
 
-# -------------------- COLORS --------------------
+# =========================================================
+# PPE CLASS NAMES
+# =========================================================
 
-SAFE_COLOR = (60, 220, 80)
-DANGER_COLOR = (0, 0, 255)
-WARNING_COLOR = (0, 165, 255)
+POSITIVE_HELMET_NAMES = {
+    "hardhat",
+    "helmet"
+}
 
-CYAN = (255, 220, 0)
-WHITE = (255, 255, 255)
-BLACK = (20, 20, 20)
-GRAY = (170, 170, 170)
+NEGATIVE_HELMET_NAMES = {
+    "no-hardhat",
+    "no-helmet"
+}
 
-PANEL_COLOR = (18, 24, 32)
+POSITIVE_VEST_NAMES = {
+    "safety-vest",
+    "vest"
+}
+
+NEGATIVE_VEST_NAMES = {
+    "no-safety-vest",
+    "no-vest"
+}
+
+POSITIVE_GLOVE_NAMES = {
+    "gloves",
+    "glove"
+}
+
+NEGATIVE_GLOVE_NAMES = {
+    "no-gloves",
+    "no-glove"
+}
+
+FALL_NAMES = {
+    "fall",
+    "fall-detected"
+}
 
 
-# -------------------- BASIC HELPERS --------------------
+# =========================================================
+# BOX UTILITY FUNCTIONS
+# =========================================================
 
-def box_center(box_coordinates):
-    x1, y1, x2, y2 = box_coordinates
+def clamp_box(box, image_width, image_height):
+    """
+    Keeps bounding-box coordinates inside the image.
+    """
 
-    center_x = (x1 + x2) // 2
-    center_y = (y1 + y2) // 2
+    x1, y1, x2, y2 = box
+
+    x1 = max(0, min(int(x1), image_width - 1))
+    y1 = max(0, min(int(y1), image_height - 1))
+    x2 = max(0, min(int(x2), image_width - 1))
+    y2 = max(0, min(int(y2), image_height - 1))
+
+    return x1, y1, x2, y2
+
+
+def box_center(box):
+    x1, y1, x2, y2 = box
+
+    center_x = int((x1 + x2) / 2)
+    center_y = int((y1 + y2) / 2)
 
     return center_x, center_y
 
 
-def point_inside_person(center_x, center_y, person_box):
-    px1, py1, px2, py2 = person_box
+def point_inside_box(point, box):
+    point_x, point_y = point
+    x1, y1, x2, y2 = box
 
     return (
-        px1 <= center_x <= px2
-        and py1 <= center_y <= py2
+        x1 <= point_x <= x2
+        and y1 <= point_y <= y2
     )
 
 
-def get_ppe_detections(ppe_results):
-    detections = []
+def intersection_over_item_area(person_box, item_box):
+    px1, py1, px2, py2 = person_box
+    ix1, iy1, ix2, iy2 = item_box
 
-    for result in ppe_results:
+    intersection_x1 = max(px1, ix1)
+    intersection_y1 = max(py1, iy1)
+    intersection_x2 = min(px2, ix2)
+    intersection_y2 = min(py2, iy2)
 
-        if result.boxes is None:
-            continue
+    intersection_width = max(
+        0,
+        intersection_x2 - intersection_x1
+    )
 
-        for box in result.boxes:
+    intersection_height = max(
+        0,
+        intersection_y2 - intersection_y1
+    )
 
-            class_id = int(box.cls[0])
-            class_name = result.names[class_id]
-            confidence = float(box.conf[0])
+    intersection_area = (
+        intersection_width
+        * intersection_height
+    )
 
-            x1, y1, x2, y2 = map(
-                int,
-                box.xyxy[0]
-            )
+    item_width = max(1, ix2 - ix1)
+    item_height = max(1, iy2 - iy1)
 
-            detections.append({
-                "class_name": class_name,
-                "confidence": confidence,
-                "box": (x1, y1, x2, y2)
-            })
+    item_area = item_width * item_height
 
-    return detections
+    return intersection_area / item_area
 
 
-# -------------------- PPE CHECKING --------------------
+def belongs_to_worker(person_box, ppe_box):
+    """
+    Checks whether a PPE detection belongs to a worker.
+    """
 
-def check_worker_ppe(person_box, ppe_detections):
-    helmet_status = "UNKNOWN"
-    vest_status = "UNKNOWN"
+    ppe_center = box_center(ppe_box)
 
-    helmet_confidence = 0.0
-    vest_confidence = 0.0
+    if point_inside_box(ppe_center, person_box):
+        return True
+
+    overlap = intersection_over_item_area(
+        person_box,
+        ppe_box
+    )
+
+    return overlap >= 0.50
+
+
+# =========================================================
+# PPE STATUS FUNCTIONS
+# =========================================================
+
+def choose_status(
+    current_value,
+    current_confidence,
+    new_value,
+    new_confidence
+):
+    if new_confidence > current_confidence:
+        return new_value, new_confidence
+
+    return current_value, current_confidence
+
+
+def get_worker_ppe_status(
+    person_box,
+    ppe_detections
+):
+    status = {
+        "helmet": None,
+        "vest": None,
+        "gloves": None,
+        "fall": False
+    }
+
+    confidence = {
+        "helmet": 0.0,
+        "vest": 0.0,
+        "gloves": 0.0
+    }
 
     for detection in ppe_detections:
 
-        class_name = detection["class_name"]
-        confidence = detection["confidence"]
-        ppe_box = detection["box"]
+        ppe_box = detection.get("box")
 
-        center_x, center_y = box_center(ppe_box)
+        if ppe_box is None:
+            continue
 
-        if not point_inside_person(
-            center_x,
-            center_y,
-            person_box
+        if not belongs_to_worker(
+            person_box,
+            ppe_box
         ):
             continue
 
-        if class_name == "Hardhat":
+        name = detection.get(
+            "normalized_name",
+            ""
+        )
 
-            if confidence > helmet_confidence:
-                helmet_status = "SAFE"
-                helmet_confidence = confidence
+        score = float(
+            detection.get(
+                "confidence",
+                0.0
+            )
+        )
 
-        elif class_name == "NO-Hardhat":
+        if name in POSITIVE_HELMET_NAMES:
+            (
+                status["helmet"],
+                confidence["helmet"]
+            ) = choose_status(
+                status["helmet"],
+                confidence["helmet"],
+                True,
+                score
+            )
 
-            if confidence > helmet_confidence:
-                helmet_status = "MISSING"
-                helmet_confidence = confidence
+        elif name in NEGATIVE_HELMET_NAMES:
+            (
+                status["helmet"],
+                confidence["helmet"]
+            ) = choose_status(
+                status["helmet"],
+                confidence["helmet"],
+                False,
+                score
+            )
 
-        elif class_name == "Safety Vest":
+        elif name in POSITIVE_VEST_NAMES:
+            (
+                status["vest"],
+                confidence["vest"]
+            ) = choose_status(
+                status["vest"],
+                confidence["vest"],
+                True,
+                score
+            )
 
-            if confidence > vest_confidence:
-                vest_status = "SAFE"
-                vest_confidence = confidence
+        elif name in NEGATIVE_VEST_NAMES:
+            (
+                status["vest"],
+                confidence["vest"]
+            ) = choose_status(
+                status["vest"],
+                confidence["vest"],
+                False,
+                score
+            )
 
-        elif class_name == "NO-Safety Vest":
+        elif name in POSITIVE_GLOVE_NAMES:
+            (
+                status["gloves"],
+                confidence["gloves"]
+            ) = choose_status(
+                status["gloves"],
+                confidence["gloves"],
+                True,
+                score
+            )
 
-            if confidence > vest_confidence:
-                vest_status = "MISSING"
-                vest_confidence = confidence
+        elif name in NEGATIVE_GLOVE_NAMES:
+            (
+                status["gloves"],
+                confidence["gloves"]
+            ) = choose_status(
+                status["gloves"],
+                confidence["gloves"],
+                False,
+                score
+            )
+
+        elif name in FALL_NAMES:
+            status["fall"] = True
+
+    return status
+
+
+def status_word(value):
+    if value is True:
+        return "YES"
+
+    if value is False:
+        return "NO"
+
+    return "N/A"
+
+
+def worker_is_unsafe(status):
+    """
+    Worker is unsafe only when the model detects a negative PPE
+    class or a fall.
+    """
 
     return (
-        helmet_status,
-        vest_status,
-        helmet_confidence,
-        vest_confidence
+        status["helmet"] is False
+        or status["vest"] is False
+        or status["gloves"] is False
+        or status["fall"] is True
     )
 
 
-def get_overall_status(
-    helmet_status,
-    vest_status
-):
-    if (
-        helmet_status == "MISSING"
-        or vest_status == "MISSING"
-    ):
-        return "UNSAFE", DANGER_COLOR
+# =========================================================
+# DRAWING FUNCTIONS
+# =========================================================
 
-    if (
-        helmet_status == "SAFE"
-        and vest_status == "SAFE"
-    ):
-        return "SAFE", SAFE_COLOR
+def get_scaled_values(image):
+    """
+    Creates suitable text and line sizes based on image resolution.
+    The image itself is never resized.
+    """
 
-    return "CHECK PPE", WARNING_COLOR
+    image_height, image_width = image.shape[:2]
+
+    reference_size = max(
+        image_width,
+        image_height
+    )
+
+    font_scale = max(
+        0.42,
+        min(reference_size / 2200, 0.65)
+    )
+
+    small_font_scale = max(
+        0.36,
+        min(reference_size / 2600, 0.52)
+    )
+
+    box_thickness = max(
+        1,
+        min(int(reference_size / 700), 3)
+    )
+
+    text_thickness = 1
+
+    return (
+        font_scale,
+        small_font_scale,
+        box_thickness,
+        text_thickness
+    )
 
 
-# -------------------- TEXT DRAWING --------------------
-
-def draw_text_with_background(
-    image,
+def draw_compact_label(
+    frame,
     text,
     x,
     y,
-    text_color,
     background_color,
-    font_scale=0.45,
-    thickness=1
+    font_scale,
+    text_thickness=1
 ):
-    height, width = image.shape[:2]
+    """
+    Draws a small readable label without covering large
+    parts of the image.
+    """
+
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    padding_x = 6
+    padding_y = 5
 
     text_size, baseline = cv2.getTextSize(
         text,
-        cv2.FONT_HERSHEY_SIMPLEX,
+        font,
         font_scale,
-        thickness
+        text_thickness
     )
 
     text_width, text_height = text_size
 
-    x = max(0, min(x, width - text_width - 14))
-    y = max(text_height + 10, min(y, height - baseline - 5))
+    image_height, image_width = frame.shape[:2]
+
+    label_width = (
+        text_width
+        + padding_x * 2
+    )
+
+    label_height = (
+        text_height
+        + padding_y * 2
+        + baseline
+    )
+
+    x = max(
+        0,
+        min(
+            int(x),
+            image_width - label_width
+        )
+    )
+
+    y = int(y)
+
+    if y - label_height < 0:
+        top = max(0, y)
+        bottom = min(
+            image_height - 1,
+            top + label_height
+        )
+    else:
+        bottom = min(
+            image_height - 1,
+            y
+        )
+
+        top = max(
+            0,
+            bottom - label_height
+        )
+
+    overlay = frame.copy()
 
     cv2.rectangle(
-        image,
-        (x, y - text_height - 9),
-        (x + text_width + 12, y + baseline + 4),
+        overlay,
+        (x, top),
+        (x + label_width, bottom),
         background_color,
         -1
     )
 
-    cv2.putText(
-        image,
-        text,
-        (x + 6, y - 3),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        font_scale,
-        text_color,
-        thickness,
-        cv2.LINE_AA
-    )
-
-
-# -------------------- WORKER DRAWING --------------------
-
-def draw_worker(
-    output,
-    person_box,
-    person_confidence,
-    worker_number,
-    helmet_status,
-    vest_status
-):
-    x1, y1, x2, y2 = person_box
-
-    overall_status, status_color = get_overall_status(
-        helmet_status,
-        vest_status
-    )
-
-    cv2.rectangle(
-        output,
-        (x1, y1),
-        (x2, y2),
-        status_color,
-        2
-    )
-
-    worker_text = (
-        f"WORKER {worker_number} "
-        f"{person_confidence:.2f}"
-    )
-
-    worker_label_y = y1 - 7
-
-    if worker_label_y < 25:
-        worker_label_y = y1 + 25
-
-    draw_text_with_background(
-        output,
-        worker_text,
-        x1,
-        worker_label_y,
-        WHITE,
-        BLACK,
-        font_scale=0.43,
-        thickness=1
-    )
-
-    status_y = y2 + 25
-
-    if status_y >= output.shape[0]:
-        status_y = y2 - 8
-
-    draw_text_with_background(
-        output,
-        overall_status,
-        x1,
-        status_y,
-        WHITE,
-        status_color,
-        font_scale=0.50,
-        thickness=2
-    )
-
-    helmet_text = (
-        "Helmet: YES"
-        if helmet_status == "SAFE"
-        else "Helmet: NO"
-        if helmet_status == "MISSING"
-        else "Helmet: ?"
-    )
-
-    vest_text = (
-        "Vest: YES"
-        if vest_status == "SAFE"
-        else "Vest: NO"
-        if vest_status == "MISSING"
-        else "Vest: ?"
-    )
-
-    details_text = (
-        f"{helmet_text} | {vest_text}"
-    )
-
-    details_y = status_y + 22
-
-    if details_y >= output.shape[0]:
-        details_y = y2 - 28
-
-    cv2.putText(
-        output,
-        details_text,
-        (x1, details_y),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.35,
-        status_color,
-        1,
-        cv2.LINE_AA
-    )
-
-    return overall_status
-
-
-# -------------------- DASHBOARD --------------------
-
-def draw_dashboard(
-    output,
-    statistics,
-    fps=None
-):
-    image_height, image_width = output.shape[:2]
-
-    panel_x1 = 12
-    panel_y1 = 12
-
-    panel_width = min(
-        390,
-        image_width - 24
-    )
-
-    panel_height = min(
-        245,
-        image_height - 24
-    )
-
-    panel_x2 = panel_x1 + panel_width
-    panel_y2 = panel_y1 + panel_height
-
-    overlay = output.copy()
-
-    cv2.rectangle(
+    cv2.addWeighted(
         overlay,
-        (panel_x1, panel_y1),
-        (panel_x2, panel_y2),
-        PANEL_COLOR,
-        -1
+        0.78,
+        frame,
+        0.22,
+        0,
+        frame
     )
-
-    blended = cv2.addWeighted(
-        overlay,
-        0.86,
-        output,
-        0.14,
-        0
-    )
-
-    output[:] = blended
 
     cv2.rectangle(
-        output,
-        (panel_x1, panel_y1),
-        (panel_x2, panel_y2),
-        CYAN,
-        2
-    )
-
-    cv2.putText(
-        output,
-        "THIRAN VISION AI",
-        (panel_x1 + 15, panel_y1 + 28),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.65,
-        CYAN,
-        2,
-        cv2.LINE_AA
-    )
-
-    cv2.putText(
-        output,
-        "INDUSTRIAL PPE MONITORING",
-        (panel_x1 + 15, panel_y1 + 50),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.38,
-        WHITE,
-        1,
-        cv2.LINE_AA
-    )
-
-    cv2.line(
-        output,
-        (panel_x1 + 15, panel_y1 + 61),
-        (panel_x2 - 15, panel_y1 + 61),
-        GRAY,
+        frame,
+        (x, top),
+        (x + label_width, bottom),
+        background_color,
         1
     )
 
-    left_x = panel_x1 + 15
-    right_x = panel_x1 + 205
-
-    row_1 = panel_y1 + 87
-    row_2 = panel_y1 + 113
-    row_3 = panel_y1 + 139
-    row_4 = panel_y1 + 165
-    row_5 = panel_y1 + 191
-
-    cv2.putText(
-        output,
-        f"Workers       : {statistics['workers']}",
-        (left_x, row_1),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.46,
-        WHITE,
-        1,
-        cv2.LINE_AA
+    text_y = (
+        top
+        + padding_y
+        + text_height
     )
 
     cv2.putText(
-        output,
-        f"Safe          : {statistics['safe']}",
-        (left_x, row_2),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.46,
-        SAFE_COLOR,
-        1,
+        frame,
+        text,
+        (
+            x + padding_x,
+            text_y
+        ),
+        font,
+        font_scale,
+        (255, 255, 255),
+        text_thickness,
         cv2.LINE_AA
+    )
+
+
+def draw_status_bar(
+    frame,
+    worker_count,
+    safe_count,
+    unsafe_count,
+    fps=None
+):
+    """
+    Draws a small top status bar.
+    It does not resize or reduce the image quality.
+    """
+
+    image_height, image_width = frame.shape[:2]
+
+    (
+        font_scale,
+        _,
+        _,
+        text_thickness
+    ) = get_scaled_values(frame)
+
+    bar_height = max(
+        38,
+        int(image_height * 0.055)
+    )
+
+    bar_height = min(
+        bar_height,
+        58
+    )
+
+    overlay = frame.copy()
+
+    cv2.rectangle(
+        overlay,
+        (0, 0),
+        (image_width, bar_height),
+        (18, 18, 18),
+        -1
+    )
+
+    cv2.addWeighted(
+        overlay,
+        0.82,
+        frame,
+        0.18,
+        0,
+        frame
+    )
+
+    title = "THIRAN VISION AI"
+
+    status_text = (
+        f"Workers: {worker_count}   "
+        f"Safe: {safe_count}   "
+        f"Unsafe: {unsafe_count}"
+    )
+
+    title_x = 14
+
+    text_y = int(
+        bar_height * 0.68
     )
 
     cv2.putText(
-        output,
-        f"Unsafe        : {statistics['unsafe']}",
-        (right_x, row_2),
+        frame,
+        title,
+        (title_x, text_y),
         cv2.FONT_HERSHEY_SIMPLEX,
-        0.46,
-        DANGER_COLOR,
-        1,
+        font_scale,
+        (255, 255, 255),
+        text_thickness,
         cv2.LINE_AA
     )
 
-    cv2.putText(
-        output,
-        f"Helmet YES    : {statistics['helmet_yes']}",
-        (left_x, row_3),
+    title_width = cv2.getTextSize(
+        title,
         cv2.FONT_HERSHEY_SIMPLEX,
-        0.43,
-        SAFE_COLOR,
-        1,
-        cv2.LINE_AA
-    )
+        font_scale,
+        text_thickness
+    )[0][0]
 
-    cv2.putText(
-        output,
-        f"Helmet NO : {statistics['helmet_no']}",
-        (right_x, row_3),
+    status_x = title_x + title_width + 30
+
+    status_width = cv2.getTextSize(
+        status_text,
         cv2.FONT_HERSHEY_SIMPLEX,
-        0.43,
-        DANGER_COLOR,
-        1,
-        cv2.LINE_AA
-    )
+        font_scale,
+        text_thickness
+    )[0][0]
 
-    cv2.putText(
-        output,
-        f"Vest YES      : {statistics['vest_yes']}",
-        (left_x, row_4),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.43,
-        SAFE_COLOR,
-        1,
-        cv2.LINE_AA
-    )
+    available_width = image_width - status_x - 15
 
-    cv2.putText(
-        output,
-        f"Vest NO   : {statistics['vest_no']}",
-        (right_x, row_4),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.43,
-        DANGER_COLOR,
-        1,
-        cv2.LINE_AA
-    )
-
-    cv2.putText(
-        output,
-        f"Check PPE     : {statistics['check']}",
-        (left_x, row_5),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.43,
-        WARNING_COLOR,
-        1,
-        cv2.LINE_AA
-    )
-
-    current_time = datetime.now().strftime(
-        "%H:%M:%S"
-    )
-
-    footer_y = panel_y2 - 18
-
-    if fps is not None:
+    if status_width <= available_width:
+        cv2.putText(
+            frame,
+            status_text,
+            (status_x, text_y),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            font_scale,
+            (220, 220, 220),
+            text_thickness,
+            cv2.LINE_AA
+        )
+    else:
+        compact_status = (
+            f"W:{worker_count}  "
+            f"S:{safe_count}  "
+            f"U:{unsafe_count}"
+        )
 
         cv2.putText(
-            output,
-            f"FPS: {fps:.1f}",
-            (left_x, footer_y),
+            frame,
+            compact_status,
+            (status_x, text_y),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.38,
-            WHITE,
-            1,
+            font_scale,
+            (220, 220, 220),
+            text_thickness,
             cv2.LINE_AA
         )
 
-    cv2.putText(
-        output,
-        current_time,
-        (panel_x2 - 85, footer_y),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.38,
-        WHITE,
-        1,
-        cv2.LINE_AA
+    if fps is not None:
+        fps_text = f"FPS {fps:.1f}"
+
+        fps_width = cv2.getTextSize(
+            fps_text,
+            cv2.FONT_HERSHEY_SIMPLEX,
+            font_scale,
+            text_thickness
+        )[0][0]
+
+        fps_x = max(
+            10,
+            image_width - fps_width - 15
+        )
+
+        cv2.putText(
+            frame,
+            fps_text,
+            (fps_x, text_y),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            font_scale,
+            (0, 255, 255),
+            text_thickness,
+            cv2.LINE_AA
+        )
+
+
+def draw_fall_alert(
+    frame,
+    x1,
+    y2,
+    font_scale
+):
+    text = "FALL DETECTED"
+
+    image_height = frame.shape[0]
+
+    alert_y = min(
+        image_height - 5,
+        y2 + 28
+    )
+
+    draw_compact_label(
+        frame=frame,
+        text=text,
+        x=x1,
+        y=alert_y,
+        background_color=(0, 0, 220),
+        font_scale=font_scale,
+        text_thickness=1
     )
 
 
-# -------------------- MAIN VISUALIZER --------------------
+# =========================================================
+# MAIN VISUALIZER FUNCTION
+# =========================================================
 
 def draw_detection_dashboard(
     image,
     person_results,
     ppe_results,
-    worker_count,
+    worker_count=None,
     ppe_summary=None,
-    fps=None
+    fps=None,
+    show_status_bar=True
 ):
-    output = image.copy()
+    """
+    Draws clean worker bounding boxes without resizing
+    or lowering the original image quality.
+    """
 
-    ppe_detections = get_ppe_detections(
+    if image is None:
+        raise ValueError(
+            "Input image cannot be None."
+        )
+
+    # Work on a copy of the original-resolution image.
+    output_frame = image.copy()
+
+    image_height, image_width = output_frame.shape[:2]
+
+    (
+        font_scale,
+        small_font_scale,
+        box_thickness,
+        text_thickness
+    ) = get_scaled_values(output_frame)
+
+    person_detections = []
+
+    for detection in extract_detections(
+        person_results
+    ):
+        normalized_name = detection.get(
+            "normalized_name",
+            ""
+        )
+
+        if normalized_name == "person":
+            person_detections.append(
+                detection
+            )
+
+    ppe_detections = extract_detections(
         ppe_results
     )
 
-    statistics = {
-        "workers": 0,
-        "safe": 0,
-        "unsafe": 0,
-        "check": 0,
-        "helmet_yes": 0,
-        "helmet_no": 0,
-        "helmet_unknown": 0,
-        "vest_yes": 0,
-        "vest_no": 0,
-        "vest_unknown": 0
-    }
-
-    worker_number = 1
-
-    for result in person_results:
-
-        if result.boxes is None:
-            continue
-
-        for box in result.boxes:
-
-            class_id = int(box.cls[0])
-            class_name = result.names[class_id]
-
-            if class_name.lower() != "person":
-                continue
-
-            confidence = float(box.conf[0])
-
-            person_box = tuple(
-                map(int, box.xyxy[0])
-            )
-
-            (
-                helmet_status,
-                vest_status,
-                helmet_confidence,
-                vest_confidence
-            ) = check_worker_ppe(
-                person_box,
-                ppe_detections
-            )
-
-            overall_status = draw_worker(
-                output,
-                person_box,
-                confidence,
-                worker_number,
-                helmet_status,
-                vest_status
-            )
-
-            statistics["workers"] += 1
-
-            if overall_status == "SAFE":
-                statistics["safe"] += 1
-
-            elif overall_status == "UNSAFE":
-                statistics["unsafe"] += 1
-
-            else:
-                statistics["check"] += 1
-
-            if helmet_status == "SAFE":
-                statistics["helmet_yes"] += 1
-
-            elif helmet_status == "MISSING":
-                statistics["helmet_no"] += 1
-
-            else:
-                statistics["helmet_unknown"] += 1
-
-            if vest_status == "SAFE":
-                statistics["vest_yes"] += 1
-
-            elif vest_status == "MISSING":
-                statistics["vest_no"] += 1
-
-            else:
-                statistics["vest_unknown"] += 1
-
-            worker_number += 1
-
-    # Use the real visualized worker count.
-    statistics["workers"] = worker_number - 1
-
-    draw_dashboard(
-        output,
-        statistics,
-        fps
+    person_detections.sort(
+        key=lambda detection: (
+            detection["box"][0],
+            detection["box"][1]
+        )
     )
 
-    return output
+    actual_worker_count = len(
+        person_detections
+    )
+
+    unsafe_count = 0
+    safe_count = 0
+
+    for worker_number, person in enumerate(
+        person_detections,
+        start=1
+    ):
+        person_box = clamp_box(
+            person["box"],
+            image_width,
+            image_height
+        )
+
+        x1, y1, x2, y2 = person_box
+
+        status = get_worker_ppe_status(
+            person_box,
+            ppe_detections
+        )
+
+        unsafe = worker_is_unsafe(
+            status
+        )
+
+        if unsafe:
+            box_color = (0, 0, 220)
+            safety_text = "UNSAFE"
+            unsafe_count += 1
+        else:
+            box_color = (0, 190, 0)
+            safety_text = "SAFE"
+            safe_count += 1
+
+        # Thin worker bounding box.
+        cv2.rectangle(
+            output_frame,
+            (x1, y1),
+            (x2, y2),
+            box_color,
+            box_thickness
+        )
+
+        worker_label = (
+            f"Worker {worker_number} - "
+            f"{safety_text}"
+        )
+
+        # Only one small label is placed above the worker.
+        draw_compact_label(
+            frame=output_frame,
+            text=worker_label,
+            x=x1,
+            y=y1,
+            background_color=box_color,
+            font_scale=font_scale,
+            text_thickness=text_thickness
+        )
+
+        # Small PPE status label is placed inside the
+        # lower part of the box to avoid overlapping.
+        ppe_label = (
+            f"H:{status_word(status['helmet'])}  "
+            f"V:{status_word(status['vest'])}  "
+            f"G:{status_word(status['gloves'])}"
+        )
+
+        ppe_label_y = max(
+            y1 + 32,
+            y2 - 6
+        )
+
+        draw_compact_label(
+            frame=output_frame,
+            text=ppe_label,
+            x=x1,
+            y=ppe_label_y,
+            background_color=(35, 35, 35),
+            font_scale=small_font_scale,
+            text_thickness=1
+        )
+
+        if status["fall"]:
+            draw_fall_alert(
+                output_frame,
+                x1,
+                y2,
+                font_scale
+            )
+
+    if show_status_bar:
+        draw_status_bar(
+            frame=output_frame,
+            worker_count=actual_worker_count,
+            safe_count=safe_count,
+            unsafe_count=unsafe_count,
+            fps=fps
+        )
+
+    return output_frame 
