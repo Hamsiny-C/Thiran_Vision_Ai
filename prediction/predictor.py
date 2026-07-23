@@ -5,6 +5,8 @@ predictor.py
 Main Prediction Module
 """
 
+from pprint import pprint
+
 from sensors.sensor_manager import get_machine_data
 
 from prediction.health import calculate_health
@@ -12,17 +14,21 @@ from prediction.maintenance import predict_maintenance
 from prediction.fire import predict_fire
 
 
-def run_prediction():
+def predict_machine(sensor_data):
 
-    sensor_data = get_machine_data()
+    health = calculate_health(
+        sensor_data
+    )
 
-    health = calculate_health(sensor_data)
+    maintenance = predict_maintenance(
+        health
+    )
 
-    maintenance = predict_maintenance(health)
+    fire = predict_fire(
+        sensor_data
+    )
 
-    fire = predict_fire(sensor_data)
-
-    result = {
+    return {
 
         "sensor_data": sensor_data,
 
@@ -34,11 +40,22 @@ def run_prediction():
 
     }
 
-    return result
+
+def run_prediction(machine_name):
+
+    sensor_data = get_machine_data(
+        machine_name
+    )
+
+    return predict_machine(
+        sensor_data
+    )
 
 
 if __name__ == "__main__":
 
-    from pprint import pprint
-
-    pprint(run_prediction())
+    pprint(
+        run_prediction(
+            "Test Machine"
+        )
+    )

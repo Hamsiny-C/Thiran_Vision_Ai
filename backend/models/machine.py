@@ -1,26 +1,95 @@
+# from backend.database import db
+
+
+# class Machine(db.Model):
+
+#     id = db.Column(db.Integer, primary_key=True)
+
+#     machine_name = db.Column(db.String(100))
+
+#     temperature = db.Column(db.Float)
+
+#     humidity = db.Column(db.Float)
+
+#     gas = db.Column(db.Float)
+
+#     rpm = db.Column(db.Integer)
+
+#     current = db.Column(db.Float)
+
+#     noise = db.Column(db.Float)
+
+#     vibration = db.Column(db.Float)
+
+#     health = db.Column(db.Integer)
+
+#     fire_status = db.Column(db.String(50))
+
+
+
+
+
+
 from backend.database import db
 
 
 class Machine(db.Model):
 
-    id = db.Column(db.Integer, primary_key=True)
+    __tablename__ = "machines"
 
-    machine_name = db.Column(db.String(100))
+    id = db.Column(
+        db.Integer,
+        primary_key=True
+    )
 
-    temperature = db.Column(db.Float)
+    machine_code = db.Column(
+        db.String(20),
+        unique=True,
+        nullable=False
+    )
 
-    humidity = db.Column(db.Float)
+    machine_name = db.Column(
+        db.String(100),
+        nullable=False
+    )
 
-    gas = db.Column(db.Float)
+    machine_type = db.Column(
+        db.String(100),
+        nullable=True
+    )
 
-    rpm = db.Column(db.Integer)
+    location = db.Column(
+        db.String(100),
+        nullable=True
+    )
 
-    current = db.Column(db.Float)
+    status = db.Column(
+        db.String(20),
+        default="Active"
+    )
 
-    noise = db.Column(db.Float)
+    data_source = db.Column(
+        db.String(20),
+        default="Simulation"
+    )
 
-    vibration = db.Column(db.Float)
 
-    health = db.Column(db.Integer)
+    def to_dict(self):
 
-    fire_status = db.Column(db.String(50))
+        return {
+
+            "id": self.id,
+
+            "machine_code": self.machine_code,
+
+            "machine_name": self.machine_name,
+
+            "machine_type": self.machine_type,
+
+            "location": self.location,
+
+            "status": self.status,
+
+            "data_source": self.data_source
+
+        }

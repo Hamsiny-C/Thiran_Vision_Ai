@@ -7,6 +7,7 @@ from backend.routes import register_routes
 
 # Import models so SQLAlchemy knows about them
 from backend.models.machine import Machine
+from backend.models.sensor_reading import SensorReading
 
 
 app = Flask(__name__)

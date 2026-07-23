@@ -9,9 +9,6 @@ If you want to change any sensor range,
 change it here only.
 """
 
-# Machine Details
-MACHINE_NAME = "Machine A"
-
 # Temperature (°C)
 MIN_TEMPERATURE = 40
 MAX_TEMPERATURE = 90
